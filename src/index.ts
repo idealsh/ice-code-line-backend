@@ -11,39 +11,6 @@ const sql = postgres(process.env.DB_URL!, {
   transform: postgres.camel
 });
 
-interface Task<T> {
-  id: string;
-  perform: () => Promise<T>;
-  success: (value: T) => void;
-  error: (value: unknown) => void;
-}
-
-const sequentialTasks: Array<Task<any>> = [];
-let isExecutingTasks = false;
-
-async function executeTasks() {
-  let task: Task<unknown> | undefined;
-  while ((task = sequentialTasks.shift()) !== undefined) {
-    await task.perform().then(task.success).catch(task.error);
-  }
-}
-
-function queueTask<T>(id: string, perform: () => Promise<T>): Promise<T> {
-  const promise = new Promise<T>((res, rej) => {
-    const task: Task<T> = { id, perform: perform, success: res, error: rej };
-    sequentialTasks.push(task);
-  });
-
-  if (!isExecutingTasks && sequentialTasks.length > 0) {
-    isExecutingTasks = true;
-    executeTasks().finally(() => {
-      isExecutingTasks = false;
-    });
-  }
-
-  return promise;
-}
-
 server.register(async (childServer) => {
   childServer.register(fastifyCookie);
   childServer.register(fastifyJwt, {
@@ -99,9 +66,38 @@ server.register(async (childServer) => {
     return results;
   });
 
-  const startTime = Date.now();
+  /**
+   * Randomize and returns the successful iteration number
+   */
+  async function randomizeNong(phiId: string): Promise<number | null> {
+    for (let i = 0; i < 100; i++) {
+      const result = await sql`
+        SELECT freshmen.id FROM freshmen
+        LEFT JOIN code_lines ON nong_id = freshmen.id
+        WHERE phi_id IS NULL
+      `;
+      const availableNongs = result.map((e) => e.id);
+      const randomNongId = availableNongs[Math.floor(Math.random() * availableNongs.length)];
+
+      let success = false;
+      try {
+        await sql`INSERT INTO code_lines ${sql({ phiId, nongId: randomNongId })}`;
+        success = true;
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        if (code !== "23505") throw error;
+      }
+
+      if (success) {
+        return i;
+      }
+    }
+
+    return null;
+  }
 
   childServer.post("/api/nongs", async (req, res) => {
+    const startTime = Date.now();
     const ipToken = req.body as string | undefined;
 
     if (!ipToken) {
@@ -133,34 +129,40 @@ server.register(async (childServer) => {
 
     await sql`INSERT INTO events ${sql({ ip, userId: id, event: "randomize_queued" })}`;
 
-    console.log(`${id} T+${Date.now() - startTime}: queueing task`);
-    await queueTask(id, async () => {
-      console.log(`${id} T+${Date.now() - startTime}: task started`);
-      await sql.begin(async (sql) => {
-        console.log(`${id} T+${Date.now() - startTime}: sql begin`);
-        const results = await sql`
-          SELECT freshmen.id FROM freshmen
-          LEFT JOIN code_lines ON nong_id = freshmen.id
-          WHERE phi_id IS NULL
-        `;
-        console.log(`${id} T+${Date.now() - startTime}: fetched results`);
-        const availableNongs = results.map((e) => e.id);
+    const iter = await randomizeNong(id);
 
-        const randomNongId = availableNongs[Math.floor(Math.random() * availableNongs.length)];
+    if (iter === null) {
+      res.status(500);
+      return { message: "Randomization failed: reached iteration limit" };
+    }
 
-        await sql`INSERT INTO code_lines ${sql({ phiId: id, nongId: randomNongId })}`;
-        console.log(`${id} T+${Date.now() - startTime}: inserted into code_lines`);
-
-        await sql`INSERT INTO events ${sql({ ip, userId: id, event: "randomize_finished" })}`;
-        console.log(`${id} T+${Date.now() - startTime}: inserted finished event`);
-      });
-
-      console.log(`${id} T+${Date.now() - startTime}: task ending`);
-      // await new Promise((res) => setTimeout(res, 2000));
-    });
-    console.log(`${id} T+${Date.now() - startTime}: task ended`);
-
+    await sql`INSERT INTO events ${sql({ ip, userId: id, event: "randomize_finished" })}`;
+    await sql`INSERT INTO randomization_times ${sql({
+      ip,
+      userId: id,
+      millisElapsed: Date.now() - startTime,
+      successIteration: iter
+    })}`;
     res.status(201);
+
+    // FOR PERFORMANCE TESTING
+    // const result = await sql`SELECT id FROM sophomores`;
+    // for (const e of result) {
+    //   await sql`INSERT INTO freshmen ${sql({
+    //     id: e.id,
+    //     name: "Name",
+    //     fullName: "fullname",
+    //     instagram: "ig",
+    //     line: "line",
+    //     favoriteThings: "nothing"
+    //   })}`;
+    // }
+    //
+    // await Promise.all(
+    //   result.map(async (e) => {
+    //     randomizeNong(e.id, ip);
+    //   })
+    // );
   });
 });
 
