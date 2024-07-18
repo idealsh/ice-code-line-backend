@@ -242,10 +242,6 @@ server.register(async (childServer) => {
         // throws the error forward if it's not a 23505 unique constraint violation
         if (code !== "23505") throw error;
       }
-
-      if (success) {
-        return i;
-      }
     }
 
     return null;
